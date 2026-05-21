@@ -1,49 +1,82 @@
 name: Kerit-Renew
+
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '12 2 */3 * *'
+
 jobs:
   run_kerit_login:
     runs-on: ubuntu-latest
+
     steps:
       - name: 📥 下载公库代码
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
       - name: 🐍 设置 Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
       - name: 📡 安装 Hysteria2
         run: |
           if [ -n "${{ secrets.HY2_PROXY_URL }}" ]; then
             echo "安装 Hysteria2..."
+
             curl -L -o hysteria \
               https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64
+
             chmod +x hysteria
             sudo mv hysteria /usr/local/bin/hysteria
+
             hysteria version
+
             echo "✅ Hysteria2 安装完成"
           else
             echo "⚠️ 未配置代理，跳过 Hysteria2 安装"
           fi
+
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
-            google-chrome-stable \
             xvfb \
             x11-utils \
             xdotool \
-            scrot
+            scrot \
+            wget \
+            curl
+
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | \
+            sudo tee /etc/apt/sources.list.d/google-chrome.list
+
+          sudo apt-get update
+
+          sudo apt-get install -y google-chrome-stable
+
       - name: 🐍 安装 Python 依赖
         run: |
+          pip install --upgrade pip
           pip install seleniumbase
+
           seleniumbase install uc_driver
+
       - name: ⏳ 添加随机延迟
         run: |
           delay=$((RANDOM % 120))
-          echo "随机延迟: ${delay}秒"
+          echo "随机延迟: ${delay} 秒"
+
           sleep $delay
+
       - name: 🚀 运行脚本
         env:
           PYTHONIOENCODING: utf-8
@@ -51,27 +84,43 @@ jobs:
           HY2_PROXY_URL: ${{ secrets.HY2_PROXY_URL }}
           SOCKS_PORT: ${{ secrets.SOCKS_PORT || '51080' }}
           TG_BOT: ${{ secrets.TG_BOT }}
+
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python kerit_renew.py
+          xvfb-run \
+            --auto-servernum \
+            --server-args="-screen 0 1920x1080x24" \
+            python kerit_renew.py
+
       - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: "*.png"
+
       - name: ⏱️ 提交执行时间
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p kerit && echo "$(date +'%Y-%m-%d %H:%M:%S')" > kerit/time.txt
-          git add kerit/time.txt 2>/dev/null || true
+
+          mkdir -p kerit
+
+          date +"%Y-%m-%d %H:%M:%S" > kerit/time.txt
+
+          git add kerit/time.txt
+
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
-          else
-            TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
-            git commit -m "⏱️ 更新 kerit 执行时间: $TIMESTAMP"
-            git fetch origin main
-            git push -f origin HEAD:main
-            echo "✅ 更改已推送"
+            exit 0
           fi
+
+          TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+
+          git commit -m "⏱️ 更新 kerit 执行时间: $TIMESTAMP"
+
+          git pull --rebase origin main
+
+          git push origin HEAD:main
+
+          echo "✅ 更改已推送"
