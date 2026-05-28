@@ -198,7 +198,6 @@ def send_tg(result, server_id=None, remaining=None, ip_info=None, email=None):
         f"🕐 运行时间: {now_str()}",
     ]
     if email:
-        # 如果 TG_CHAT_ID 为空，则使用 id=0000，否则使用实际的 chat_id
         tg_user_id = TG_CHAT_ID if TG_CHAT_ID else "0000"
         tg_user_link = f'<a href="tg://user?id={tg_user_id}">{email}</a>'
         lines.append(f"📮 邮箱: {tg_user_link}")
@@ -327,7 +326,7 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
 
 
 # ============================================================
-# Turnstile 工具函数（新版，去除 xdotool 依赖）
+# Turnstile 验证（全自动，无 xdotool）
 # ============================================================
 
 def check_token(sb) -> bool:
@@ -371,20 +370,20 @@ def get_token_value(sb) -> str:
 
 def solve_turnstile(sb) -> bool:
     """
-    使用 SeleniumBase UC 模式自带的 gui_click_captcha 方法过 Cloudflare Turnstile。
-    若页面仍然出现 iframe，则尝试手动切入点击。
+    使用 SeleniumBase UC 模式全自动通过 Cloudflare Turnstile 验证。
+    先尝试内置的 gui_click_captcha，如果仍有挑战 iframe 则自动切入点击。
     """
-    # 第一步：尝试自动点击 Turnstile 验证
+    # 第一步：尝试自动点击 Turnstile
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
     except Exception:
         pass
 
-    # 第二步：如果还有 Cloudflare 挑战 iframe，手动切入点击
+    # 第二步：如果还有 Cloudflare 挑战 iframe，自动切入并点击
     try:
         if sb.is_element_visible('iframe[src*="challenges.cloudflare"]'):
-            print("⚠️ 发现 CF 挑战 iframe，手动点击...")
+            print("⚠️ 发现 CF 挑战 iframe，自动处理...")
             sb.switch_to_frame('iframe[src*="challenges.cloudflare"]')
             sb.uc_click('input[type="checkbox"]', timeout=6)
             sb.switch_to_default_content()
@@ -577,7 +576,7 @@ def do_renew(sb, ip_info=None, email=None):
 
 
 # ============================================================
-# 主流程
+# 主流程（已修正登录前的 CF 验证逻辑）
 # ============================================================
 
 def run_script():
@@ -606,28 +605,70 @@ def run_script():
             except Exception:
                 print("⚠️ IP验证超时，跳过")
 
-            # ── 登录 ─────────────────────────────────────────────
+            # ── 登录（含自动过 CF 盾） ─────────────────────────
             print("🔑 打开登录页面...")
             sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
             time.sleep(3)
 
-            print("🛡️ 检查Cloudflare...")
-            for _ in range(20):
-                time.sleep(0.5)
-                if turnstile_exists(sb):
-                    print("🛡️ 检测到Turnstile...")
-                    if not solve_turnstile(sb):
-                        sb.save_screenshot("kerit_cf_fail.png")
-                        send_tg("❌ 登录页Turnstile验证失败", ip_info=ip_info, email=MASKED_EMAIL)
-                        return
-                    time.sleep(2)
+            # 最多尝试 5 次通过 CF
+            MAX_CF_RETRIES = 5
+            login_page_ready = False
+            for cf_attempt in range(1, MAX_CF_RETRIES + 1):
+                # 1. 先检查是否已经直接看到邮箱输入框（说明无需过 CF）
+                try:
+                    sb.wait_for_element_visible('#email-input', timeout=4)
+                    login_page_ready = True
+                    print("✅ 已到达登录页面（未遇到 CF 拦截）")
                     break
-            else:
-                print("✅ 无Turnstile，继续")
+                except:
+                    pass
 
+                # 2. 未看到输入框，开始处理 Turnstile
+                print(f"🔄 第 {cf_attempt}/{MAX_CF_RETRIES} 次尝试通过 CF 验证...")
+                if turnstile_exists(sb):
+                    print("🛡️ 检测到 Turnstile，自动验证中...")
+                    if not solve_turnstile(sb):
+                        print("❌ Turnstile 验证未通过")
+                        sb.save_screenshot(f"cf_fail_{cf_attempt}.png")
+                        if cf_attempt < MAX_CF_RETRIES:
+                            # 重新打开页面再试
+                            sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+                            time.sleep(3)
+                            continue
+                        else:
+                            send_tg("❌ CF 验证多次失败", ip_info=ip_info, email=MASKED_EMAIL)
+                            return
+                    else:
+                        # 验证通过后等待页面跳转，检查邮箱框是否出现
+                        time.sleep(3)
+                        try:
+                            sb.wait_for_element_visible('#email-input', timeout=10)
+                            login_page_ready = True
+                            print("✅ CF 验证通过，已到达登录页面")
+                            break
+                        except:
+                            print("⚠️ CF 验证通过但登录页面未出现，重试...")
+                            if cf_attempt < MAX_CF_RETRIES:
+                                sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+                                time.sleep(3)
+                            continue
+                else:
+                    print("⚠️ 未检测到 Turnstile 但也看不到登录页面，重试...")
+                    if cf_attempt < MAX_CF_RETRIES:
+                        sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=4)
+                        time.sleep(3)
+                    else:
+                        send_tg("❌ 多次重试后仍无法进入登录页面", ip_info=ip_info, email=MASKED_EMAIL)
+                        return
+
+            if not login_page_ready:
+                send_tg("❌ 未能通过 CF 进入登录页面", ip_info=ip_info, email=MASKED_EMAIL)
+                return
+
+            # ── 现在已经在登录页面，继续填写邮箱 ────────────────
             print("📭 等待邮箱框...")
             try:
-                sb.wait_for_element_visible('#email-input', timeout=20)
+                sb.wait_for_element_visible('#email-input', timeout=10)
             except Exception:
                 print("❌ 邮箱框加载失败")
                 sb.save_screenshot("kerit_no_email_input.png")
