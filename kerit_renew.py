@@ -460,12 +460,16 @@ def do_renew(sb, ip_info=None, email=None):
         # 1. 精确点击 Renew Server 按钮 (id=renewServerBtn)
         renew_clicked = False
         try:
-            if sb.is_element_visible('#renewServerBtn', timeout=10):
-                sb.click('#renewServerBtn')
-                renew_clicked = True
-                print("✅ 已点击「Renew Server」按钮")
-            else:
-                # 备用：根据文本查找
+            # 确保按钮可见并点击
+            sb.wait_for_element_visible('#renewServerBtn', timeout=10)
+            sb.click('#renewServerBtn')
+            renew_clicked = True
+            print("✅ 已点击「Renew Server」按钮")
+        except Exception as e:
+            print(f"⚠️ ID 点击异常: {e}")
+            sb.save_screenshot("renew_btn_not_found.png")
+            # 备用：根据文本查找
+            try:
                 btns = sb.find_elements('button')
                 for btn in btns:
                     if 'Renew Server' in (btn.text or ''):
@@ -473,9 +477,9 @@ def do_renew(sb, ip_info=None, email=None):
                         renew_clicked = True
                         print("✅ 已通过文本点击「Renew Server」")
                         break
-        except Exception as e:
-            print(f"⚠️ 点击 Renew Server 异常: {e}")
-        
+            except Exception as e2:
+                print(f"⚠️ 备用点击也失败: {e2}")
+
         if not renew_clicked:
             print("❌ 续期按钮缺失")
             sb.save_screenshot("no_renew_btn.png")
@@ -496,9 +500,9 @@ def do_renew(sb, ip_info=None, email=None):
         # 3. 点击广告图片触发 openAdLink()
         print("🖱️ 点击赞助商广告...")
         try:
-            if sb.is_element_visible('#adBanner', timeout=5):
+            if sb.is_element_visible('#adBanner'):
                 sb.click('#adBanner')
-            elif sb.is_element_visible('[onclick="openAdLink()"]', timeout=5):
+            elif sb.is_element_visible('[onclick="openAdLink()"]'):
                 sb.click('[onclick="openAdLink()"]')
             else:
                 sb.execute_script("openAdLink()")
@@ -527,7 +531,6 @@ def do_renew(sb, ip_info=None, email=None):
             time.sleep(2)
         else:
             print("⚠️ 未检测到新窗口，可能已被阻止或原地打开，继续...")
-            # 如果没开新窗口，等待几秒后刷新页面
             time.sleep(5)
             sb.open(FREE_PANEL_URL)
             time.sleep(4)
