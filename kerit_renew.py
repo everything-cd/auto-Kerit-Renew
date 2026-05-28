@@ -327,145 +327,11 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
 
 
 # ============================================================
-# Turnstile 工具函数
+# Turnstile 工具函数（新版，去除 xdotool 依赖）
 # ============================================================
 
-EXPAND_POPUP_JS = """
-(function() {
-    var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
-    if (!turnstileInput) return;
-    var el = turnstileInput;
-    for (var i = 0; i < 20; i++) {
-        el = el.parentElement;
-        if (!el) break;
-        var style = window.getComputedStyle(el);
-        if (style.overflow === 'hidden' || style.overflowX === 'hidden' || style.overflowY === 'hidden') {
-            el.style.overflow = 'visible';
-        }
-        el.style.minWidth = 'max-content';
-    }
-    var iframes = document.querySelectorAll('iframe');
-    iframes.forEach(function(iframe) {
-        if (iframe.src && iframe.src.includes('challenges.cloudflare.com')) {
-            iframe.style.width = '300px';
-            iframe.style.height = '65px';
-            iframe.style.minWidth = '300px';
-            iframe.style.visibility = 'visible';
-            iframe.style.opacity = '1';
-        }
-    });
-})();
-"""
-
-def xdotool_click(x, y):
-    x, y = int(x), int(y)
-    try:
-        result = subprocess.run(
-            ["xdotool", "search", "--onlyvisible", "--class", "chrome"],
-            capture_output=True, text=True, timeout=3
-        )
-        wids = [w for w in result.stdout.strip().split('\n') if w]
-        if wids:
-            subprocess.run(["xdotool", "windowactivate", wids[-1]],
-                           timeout=2, stderr=subprocess.DEVNULL)
-            time.sleep(0.2)
-        subprocess.run(["xdotool", "mousemove", str(x), str(y)], timeout=2, check=True)
-        time.sleep(0.15)
-        subprocess.run(["xdotool", "click", "1"], timeout=2, check=True)
-        print(f"📐 坐标点击成功")
-        return True
-    except Exception as e:
-        print(f"⚠️ xdotool点击失败：{e}")
-        return False
-
-
-def get_turnstile_coords(sb):
-    try:
-        return sb.execute_script("""
-            (function(){
-                var iframes = document.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {
-                    var src = iframes[i].src || '';
-                    if (src.includes('cloudflare') || src.includes('turnstile')) {
-                        var rect = iframes[i].getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            return {
-                                click_x: Math.round(rect.x + 30),
-                                click_y: Math.round(rect.y + rect.height / 2)
-                            };
-                        }
-                    }
-                }
-                var input = document.querySelector('input[name="cf-turnstile-response"]');
-                if (input) {
-                    var container = input.parentElement;
-                    for (var j = 0; j < 5; j++) {
-                        if (!container) break;
-                        var rect = container.getBoundingClientRect();
-                        if (rect.width > 100 && rect.height > 30) {
-                            return {
-                                click_x: Math.round(rect.x + 30),
-                                click_y: Math.round(rect.y + rect.height / 2)
-                            };
-                        }
-                        container = container.parentElement;
-                    }
-                }
-                return null;
-            })()
-        """)
-    except Exception:
-        return None
-
-
-def get_window_offset(sb):
-    try:
-        result = subprocess.run(
-            ["xdotool", "search", "--onlyvisible", "--class", "chrome"],
-            capture_output=True, text=True, timeout=3
-        )
-        wids = [w for w in result.stdout.strip().split('\n') if w]
-        if wids:
-            geo = subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", wids[-1]],
-                capture_output=True, text=True, timeout=3
-            ).stdout
-            geo_dict = {}
-            for line in geo.strip().split('\n'):
-                if '=' in line:
-                    k, v = line.split('=', 1)
-                    geo_dict[k.strip()] = int(v.strip())
-            win_x = geo_dict.get('X', 0)
-            win_y = geo_dict.get('Y', 0)
-            info = sb.execute_script(
-                "(function(){ return { outer: window.outerHeight, inner: window.innerHeight }; })()"
-            )
-            toolbar = info['outer'] - info['inner']
-            if not (30 <= toolbar <= 200):
-                toolbar = 87
-            return win_x, win_y, toolbar
-    except Exception:
-        pass
-    try:
-        info = sb.execute_script("""
-            (function(){
-                return {
-                    screenX: window.screenX || 0,
-                    screenY: window.screenY || 0,
-                    outer: window.outerHeight,
-                    inner: window.innerHeight
-                };
-            })()
-        """)
-        toolbar = info['outer'] - info['inner']
-        if not (30 <= toolbar <= 200):
-            toolbar = 87
-        return info['screenX'], info['screenY'], toolbar
-    except Exception:
-        return 0, 0, 87
-
-
 def check_token(sb) -> bool:
+    """检查 Cloudflare Turnstile 的 token 是否已写入隐藏 input"""
     try:
         return sb.execute_script("""
             (function(){
@@ -477,7 +343,18 @@ def check_token(sb) -> bool:
         return False
 
 
+def turnstile_exists(sb) -> bool:
+    """判断页面是否存在 Turnstile 验证元素"""
+    try:
+        return sb.execute_script(
+            "(function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })()"
+        )
+    except Exception:
+        return False
+
+
 def get_token_value(sb) -> str:
+    """获取 Turnstile token 字符串"""
     try:
         token = sb.execute_script("""
             (function(){
@@ -492,45 +369,47 @@ def get_token_value(sb) -> str:
     return ''
 
 
-def turnstile_exists(sb) -> bool:
-    try:
-        return sb.execute_script(
-            "(function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })()"
-        )
-    except Exception:
-        return False
-
-
 def solve_turnstile(sb) -> bool:
-    for _ in range(3):
-        sb.execute_script(EXPAND_POPUP_JS)
-        time.sleep(0.5)
+    """
+    使用 SeleniumBase UC 模式自带的 gui_click_captcha 方法过 Cloudflare Turnstile。
+    若页面仍然出现 iframe，则尝试手动切入点击。
+    """
+    # 第一步：尝试自动点击 Turnstile 验证
+    try:
+        sb.uc_gui_click_captcha()
+        time.sleep(3)
+    except Exception:
+        pass
 
-    if check_token(sb):
-        print("✅ Token已存在")
-        return True
+    # 第二步：如果还有 Cloudflare 挑战 iframe，手动切入点击
+    try:
+        if sb.is_element_visible('iframe[src*="challenges.cloudflare"]'):
+            print("⚠️ 发现 CF 挑战 iframe，手动点击...")
+            sb.switch_to_frame('iframe[src*="challenges.cloudflare"]')
+            sb.uc_click('input[type="checkbox"]', timeout=6)
+            sb.switch_to_default_content()
+            time.sleep(5)
+    except Exception:
+        try:
+            sb.switch_to_default_content()
+        except Exception:
+            pass
 
-    coords = get_turnstile_coords(sb)
-    if not coords:
-        print("❌ 无法获取坐标")
-        return False
-
-    win_x, win_y, toolbar = get_window_offset(sb)
-    abs_x = coords['click_x'] + win_x
-    abs_y = coords['click_y'] + win_y + toolbar
-    print(f"🖱️ 点击Token: ({abs_x}, {abs_y})")
-    xdotool_click(abs_x, abs_y)
-
+    # 第三步：等待 token 生成
     for _ in range(30):
-        time.sleep(0.5)
         if check_token(sb):
-            print("✅ Cloudflare Token通过")
+            print("✅ Cloudflare Token 验证通过")
             return True
+        time.sleep(0.5)
 
-    print("❌ Cloudflare Token超时")
+    print("❌ Cloudflare Token 验证超时")
     sb.save_screenshot("turnstile_fail.png")
     return False
 
+
+# ============================================================
+# 续期相关
+# ============================================================
 
 def extract_remaining_days(sb) -> int:
     """从 expiry-display 元素读取剩余天数"""
@@ -544,10 +423,6 @@ def extract_remaining_days(sb) -> int:
     except Exception:
         return 0
 
-
-# ============================================================
-# 续期流程
-# ============================================================
 
 def do_renew(sb, ip_info=None, email=None):
     print("🔄 跳转续期页...")
@@ -740,7 +615,7 @@ def run_script():
             for _ in range(20):
                 time.sleep(0.5)
                 if turnstile_exists(sb):
-                    print("�️ 检测到Turnstile...")
+                    print("🛡️ 检测到Turnstile...")
                     if not solve_turnstile(sb):
                         sb.save_screenshot("kerit_cf_fail.png")
                         send_tg("❌ 登录页Turnstile验证失败", ip_info=ip_info, email=MASKED_EMAIL)
