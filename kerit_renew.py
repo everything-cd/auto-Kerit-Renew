@@ -22,6 +22,7 @@ def mask_email(email_str: str) -> str:
     parts = email_str.split("@")
     local = parts[0]
     domain = parts[1]
+    
     if len(local) > 2:
         return local[0] + "*" * (len(local) - 2) + local[-1] + "@" + domain
     else:
@@ -68,11 +69,15 @@ class Hy2Proxy:
 
     def start(self) -> bool:
         print("📡 启动 Hysteria2…")
+
         u = self.url.replace("hysteria2://", "").replace("hy2://", "")
         parsed = urlparse("scheme://" + u)
         params = parse_qs(parsed.query)
+
+        # 处理 insecure 参数（支持 insecure 和 allowInsecure）
         insecure_val = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
         insecure = insecure_val == "1"
+
         cfg = {
             "server": f"{parsed.hostname}:{parsed.port}",
             "auth": unquote(parsed.username),
@@ -83,18 +88,22 @@ class Hy2Proxy:
             },
             "socks5": {"listen": f"127.0.0.1:{SOCKS_PORT}"}
         }
+
         cfg_path = "/tmp/hy2.json"
         with open(cfg_path, "w") as f:
             json.dump(cfg, f)
+
         try:
             self.proc = subprocess.Popen(
                 ["hysteria", "client", "-c", cfg_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
         except FileNotFoundError:
             print("❌ hysteria 命令未找到，请先安装 Hysteria2")
             return False
+
         for _ in range(12):
             time.sleep(1)
             with socket.socket() as s:
@@ -114,22 +123,28 @@ class Hy2Proxy:
 
 
 def get_proxy_manager():
+    """根据环境变量判断是否需要使用代理"""
     if HY2_PROXY_URL:
         return Hy2Proxy(HY2_PROXY_URL)
     return None
 
 
 def mask_ip(ip: str) -> str:
+    """脱敏 IP 地址"""
     return ip.rsplit(".", 1)[0] + ".***"
 
 
 def check_ip(proxy: str = None) -> str:
+    """检查落地 IP，明确指出是否使用了代理"""
     try:
         proxies = None
         if proxy:
             proxies = {"http": proxy, "https": proxy}
-        r = requests.get("http://ip-api.com/json/?fields=status,query,countryCode",
-                         proxies=proxies, timeout=30).json()
+        r = requests.get(
+            "http://ip-api.com/json/?fields=status,query,countryCode",
+            proxies=proxies,
+            timeout=30
+        ).json()
         if r.get("status") == "success":
             ip_str = f"{mask_ip(r['query'])} ({r['countryCode']})"
             mode = "✅ 代理" if proxy else "⚠️ 直连"
@@ -141,14 +156,18 @@ def check_ip(proxy: str = None) -> str:
 
 
 def start_proxy_with_retry(max_retries=3):
+    """启动代理，失败时重试"""
     if not HY2_PROXY_URL:
         print("⚠️ 未配置代理 URL，使用直连模式")
         return None, None
+    
     proxy_manager = get_proxy_manager()
     proxy_url = None
+    
     if not proxy_manager:
         print("⚠️ 代理管理器初始化失败，使用直连模式")
         return None, None
+    
     for attempt in range(1, max_retries + 1):
         print(f"🔄 尝试启动代理 ({attempt}/{max_retries})...")
         if proxy_manager.start():
@@ -161,6 +180,7 @@ def start_proxy_with_retry(max_retries=3):
                 time.sleep(5)
             else:
                 print("⚠️ 代理启动失败，继续使用直连模式")
+    
     return None, None
 
 
@@ -178,9 +198,11 @@ def send_tg(result, server_id=None, remaining=None, ip_info=None, email=None):
         f"🕐 运行时间: {now_str()}",
     ]
     if email:
+        # 如果 TG_CHAT_ID 为空，则使用 id=0000，否则使用实际的 chat_id
         tg_user_id = TG_CHAT_ID if TG_CHAT_ID else "0000"
         tg_user_link = f'<a href="tg://user?id={tg_user_id}">{email}</a>'
         lines.append(f"📮 邮箱: {tg_user_link}")
+
     lines.append(f"📊 续期结果: {result}")
     if server_id is not None:
         lines.append(f"🖥 服务器ID: {server_id}")
@@ -194,7 +216,9 @@ def send_tg(result, server_id=None, remaining=None, ip_info=None, email=None):
         return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
-        "chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML",
+        "chat_id": TG_CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
     }).encode()
     try:
         req = urllib.request.Request(url, data=data, method="POST")
@@ -211,11 +235,16 @@ def send_tg(result, server_id=None, remaining=None, ip_info=None, email=None):
 def fetch_otp_from_gmail(wait_seconds=60) -> str:
     print(f"📬 连接Gmail，等待{wait_seconds}s...")
     deadline = time.time() + wait_seconds
+
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(KERIT_EMAIL, GMAIL_PASSWORD)
     except imaplib.IMAP4.error as e:
         print(f"❌ Gmail 认证失败: {e}")
+        print("💡 请检查:")
+        print("   1. KERIT_ACCOUNT 环境变量是否正确")
+        print("   2. Gmail 是否启用了 IMAP 访问")
+        print("   3. 是否需要使用应用专用密码而不是账户密码")
         raise TimeoutError(f"Gmail 认证失败: {e}")
 
     spam_folder = None
@@ -230,9 +259,13 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
                 spam_folder = match.group(1).strip('"')
                 print(f"🗑️ 检查Gmail垃圾邮箱")
                 break
+
     folders_to_check = ["INBOX"]
     if spam_folder:
         folders_to_check.append(spam_folder)
+    else:
+        print("⚠️ 未找到垃圾邮箱")
+
     seen_uids = {}
     for folder in folders_to_check:
         try:
@@ -247,6 +280,7 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
 
     while time.time() < deadline:
         time.sleep(5)
+
         for folder in folders_to_check:
             try:
                 status, _ = mail.select(folder)
@@ -255,11 +289,13 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
                 _, data = mail.uid("search", None, 'FROM "kerit"')
                 all_uids = set(data[0].split())
                 new_uids = all_uids - seen_uids[folder]
+
                 for uid in new_uids:
                     seen_uids[folder].add(uid)
                     _, msg_data = mail.uid("fetch", uid, "(RFC822)")
                     raw = msg_data[0][1]
                     msg = email.message_from_bytes(raw)
+
                     body = ""
                     if msg.is_multipart():
                         for part in msg.walk():
@@ -274,31 +310,42 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
                                     break
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+
                     otp = re.search(r'\b(\d{4})\b', body)
                     if otp:
                         code = otp.group(1)
                         print(f"✅ Gmail OTP: {code}")
                         mail.logout()
                         return code
+
             except Exception as e:
                 print(f"⚠️ 检查{folder}出错: {e}")
                 continue
+
     mail.logout()
     raise TimeoutError("❌ Gmail超时")
 
 
 # ============================================================
-# 过 CF 盾（登录前）
+# 过 CF 盾（登录前）—— 完全按照参考代码逻辑
 # ============================================================
 
 def _kerit_cf_bypass(sb) -> bool:
+    """
+    执行过 CF 盾逻辑，返回是否看到登录表单（#email-input）。
+    （与参考代码的 _cf_bypass 一模一样，仅 URL 和检测元素不同）
+    """
     sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=6.0)
     time.sleep(4)
+
+    # 第一层：uc_gui_click_captcha 模拟真实鼠标点击 Turnstile
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
     except Exception:
         pass
+
+    # 第二层：若仍有 CF iframe 则自动切入点击
     try:
         if sb.is_element_visible('iframe[src*="challenges.cloudflare"]'):
             print("⚠️ 发现 CF iframe，自动处理...")
@@ -311,6 +358,8 @@ def _kerit_cf_bypass(sb) -> bool:
             sb.switch_to_default_content()
         except Exception:
             pass
+
+    # 判断是否通过（看到 #email-input）
     try:
         sb.wait_for_element_visible('#email-input', timeout=15)
         return True
@@ -319,10 +368,11 @@ def _kerit_cf_bypass(sb) -> bool:
 
 
 # ============================================================
-# Turnstile 工具（用于续期弹窗及输入邮箱后）
+# 续期过程中的 Turnstile（轻量，不重新打开页面）
 # ============================================================
 
 def check_token(sb) -> bool:
+    """检查 Cloudflare Turnstile 的 token 是否已写入隐藏 input"""
     try:
         return sb.execute_script("""
             (function(){
@@ -333,7 +383,9 @@ def check_token(sb) -> bool:
     except Exception:
         return False
 
+
 def turnstile_exists(sb) -> bool:
+    """判断页面是否存在 Turnstile 验证元素"""
     try:
         return sb.execute_script(
             "(function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })()"
@@ -341,7 +393,9 @@ def turnstile_exists(sb) -> bool:
     except Exception:
         return False
 
+
 def get_token_value(sb) -> str:
+    """获取 Turnstile token 字符串"""
     try:
         token = sb.execute_script("""
             (function(){
@@ -355,12 +409,17 @@ def get_token_value(sb) -> str:
         pass
     return ''
 
+
 def solve_turnstile_on_page(sb) -> bool:
+    """
+    在当前页面解决 Turnstile（不重新加载），用于续期等场景。
+    """
     try:
         sb.uc_gui_click_captcha()
         time.sleep(3)
     except Exception:
         pass
+
     try:
         if sb.is_element_visible('iframe[src*="challenges.cloudflare"]'):
             print("⚠️ 发现 CF iframe，自动处理...")
@@ -373,11 +432,13 @@ def solve_turnstile_on_page(sb) -> bool:
             sb.switch_to_default_content()
         except Exception:
             pass
+
     for _ in range(30):
         if check_token(sb):
             print("✅ Cloudflare Token 验证通过")
             return True
         time.sleep(0.5)
+
     print("❌ Cloudflare Token 验证超时")
     sb.save_screenshot("turnstile_fail.png")
     return False
@@ -388,6 +449,7 @@ def solve_turnstile_on_page(sb) -> bool:
 # ============================================================
 
 def extract_remaining_days(sb) -> int:
+    """从 expiry-display 元素读取剩余天数"""
     try:
         return sb.execute_script("""
             (function(){
@@ -457,7 +519,7 @@ def do_renew(sb, ip_info=None, email=None):
 
         print(f"🔁 第{attempt + 1}/{need}次续期...")
 
-        # 1. 点击 Renew Server
+        # 1. 点击 Renew Server 按钮
         renew_clicked = False
         for _ in range(10):
             try:
@@ -503,8 +565,8 @@ def do_renew(sb, ip_info=None, email=None):
                 sb.click('#adBanner')
             else:
                 sb.click('[onclick="openAdLink()"]')
-            time.sleep(2)
         except Exception:
+            # 备用 JS 点击
             try:
                 sb.execute_script("openAdLink()")
                 time.sleep(2)
@@ -514,21 +576,23 @@ def do_renew(sb, ip_info=None, email=None):
                 send_tg(f"❌ 广告点击失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
                 return
 
-        # 4. 处理新标签页
-        print("🔄 处理赞助商页面...")
-        original_window = sb.driver.current_window_handle
-        all_windows = sb.driver.window_handles
-        if len(all_windows) > 1:
-            new_window = [w for w in all_windows if w != original_window][0]
-            sb.driver.switch_to.window(new_window)
+        # 4. 等待新窗口并处理
+        print("⏳ 等待赞助商新窗口...")
+        try:
+            sb.wait_for_new_window(timeout=10)
+            sb.switch_to_newest_window()
             print("🌐 已切换到赞助商页面")
             time.sleep(5)  # 模拟访问
-            sb.driver.close()
-            sb.driver.switch_to.window(original_window)
+            sb.driver.close()  # 关闭新窗口
+            sb.switch_to_default_window()  # 回到原窗口
             time.sleep(2)
-        else:
-            print("⚠️ 未检测到新窗口，可能原地打开，等待后刷新页面...")
-            time.sleep(5)
+        except Exception as e:
+            print(f"⚠️ 处理新窗口异常: {e}")
+            # 如果没出现新窗口，可能是在原窗口内打开的，强制回到默认窗口并刷新
+            try:
+                sb.switch_to_default_window()
+            except:
+                pass
             sb.open(FREE_PANEL_URL)
             time.sleep(4)
 
@@ -656,8 +720,12 @@ def do_renew(sb, ip_info=None, email=None):
 
 def run_script():
     print("🔧 启动浏览器...")
+
+    # 初始化代理
     proxy_manager, proxy_url = start_proxy_with_retry(max_retries=3)
     ip_info = ""
+    
+    # 检查 IP 信息
     print(f"🔍 正在检查 IP 信息（使用代理: {bool(proxy_url)})...")
     ip_info = check_ip(proxy_url)
     print(f"🌐 IP 信息：{ip_info}")
@@ -666,7 +734,7 @@ def run_script():
         with SB(uc=True, test=True, proxy=proxy_url) as sb:
             print("🚀 浏览器就绪！")
 
-            # IP 验证
+            # ── IP 验证 ──────────────────────────────────────────
             print("🌐 验证出口IP...")
             try:
                 sb.open("https://api.ipify.org/?format=json")
@@ -676,7 +744,7 @@ def run_script():
             except Exception:
                 print("⚠️ IP验证超时，跳过")
 
-            # 登录
+            # ── 登录（过 CF 盾） ────────────────────────────────
             MAX_CF_ATTEMPTS = 5
             login_page_ready = False
             print("🔑 开始过 CF 盾...")
@@ -699,6 +767,7 @@ def run_script():
                 send_tg("❌ 过 CF 盾多次失败", ip_info=ip_info, email=MASKED_EMAIL)
                 return
 
+            # ── 填写邮箱 ────────────────────────────────────────
             print("📭 确认邮箱框...")
             try:
                 sb.wait_for_element_visible('#email-input', timeout=10)
@@ -711,6 +780,7 @@ def run_script():
             sb.type('#email-input', KERIT_EMAIL)
             print(f"✅ 邮箱：{MASKED_EMAIL}")
 
+            # 等待 3 秒，处理动态 Turnstile
             print("⏳ 等待 3 秒，检查动态 Turnstile...")
             time.sleep(3)
             if turnstile_exists(sb):
@@ -721,6 +791,7 @@ def run_script():
                     return
                 print("✅ Turnstile 验证通过")
 
+            # 等待按钮变为可用
             print("🖱️ 等待 Continue 按钮变为可用...")
             btn_enabled = False
             for _ in range(30):
@@ -734,6 +805,7 @@ def run_script():
                 except Exception:
                     pass
                 time.sleep(1)
+
             if not btn_enabled:
                 print("❌ 按钮长时间不可用")
                 sb.save_screenshot("btn_disabled.png")
@@ -747,6 +819,7 @@ def run_script():
                 sb.click('button#continue-btn')
             print("✅ 已点击继续，等待 OTP 发送...")
 
+            # 等待 OTP 框
             print("📨 等待OTP框...")
             try:
                 sb.wait_for_element_visible('.otp-input', timeout=30)
@@ -756,6 +829,7 @@ def run_script():
                 send_tg("❌ OTP框加载失败", ip_info=ip_info, email=MASKED_EMAIL)
                 return
 
+            # 获取 OTP
             try:
                 code = fetch_otp_from_gmail(wait_seconds=60)
             except TimeoutError as e:
@@ -804,6 +878,7 @@ def run_script():
                         break
                 except Exception:
                     continue
+
             if not verify_clicked:
                 print("❌ 验证按钮缺失")
                 sb.save_screenshot("kerit_no_verify_btn.png")
