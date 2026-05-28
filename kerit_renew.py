@@ -613,7 +613,7 @@ def do_renew(sb, ip_info=None, email=None):
 
 
 # ============================================================
-# 主流程（登录前的 CF 已改为参考代码方式）
+# 主流程（已修正输入邮箱后的 Turnstile 处理）
 # ============================================================
 
 def run_script():
@@ -665,7 +665,7 @@ def run_script():
                 send_tg("❌ 过 CF 盾多次失败", ip_info=ip_info, email=MASKED_EMAIL)
                 return
 
-            # ── 现在已经在登录页面，继续填写邮箱 ────────────────
+            # ── 填写邮箱 ────────────────────────────────────────
             print("📭 确认邮箱框...")
             try:
                 sb.wait_for_element_visible('#email-input', timeout=10)
@@ -678,27 +678,51 @@ def run_script():
             sb.type('#email-input', KERIT_EMAIL)
             print(f"✅ 邮箱：{MASKED_EMAIL}")
 
-            print("🖱️ 点击继续...")
-            clicked = False
-            for sel in [
-                '//button[contains(., "Continue with Email")]',
-                '//span[contains(., "Continue with Email")]',
-                'button[type="submit"]',
-            ]:
+            # ⚡ 关键新增：等待 3 秒，然后处理可能出现的 Turnstile
+            print("⏳ 等待 3 秒，检查动态 Turnstile...")
+            time.sleep(3)
+
+            if turnstile_exists(sb):
+                print("🛡️ 检测到 Turnstile（输入邮箱后），自动验证...")
+                if not solve_turnstile_on_page(sb):
+                    sb.save_screenshot("email_cf_fail.png")
+                    send_tg("❌ 输入邮箱后 Turnstile 验证失败", ip_info=ip_info, email=MASKED_EMAIL)
+                    return
+                print("✅ Turnstile 验证通过，按钮即将可用")
+            else:
+                print("✅ 无 Turnstile，继续")
+
+            # ── 等待按钮变为可用（非 disabled） ────────────────
+            print("🖱️ 等待 Continue 按钮变为可用...")
+            btn_enabled = False
+            for _ in range(30):
                 try:
-                    if sb.is_element_visible(sel):
-                        sb.click(sel)
-                        clicked = True
+                    disabled = sb.execute_script(
+                        "return document.getElementById('continue-btn').disabled"
+                    )
+                    if not disabled:
+                        btn_enabled = True
                         break
                 except Exception:
-                    continue
+                    pass
+                time.sleep(1)
 
-            if not clicked:
-                print("❌ 继续按钮缺失")
-                sb.save_screenshot("kerit_no_continue_btn.png")
-                send_tg("❌ 继续按钮缺失", ip_info=ip_info, email=MASKED_EMAIL)
+            if not btn_enabled:
+                print("❌ 按钮长时间不可用")
+                sb.save_screenshot("btn_disabled.png")
+                send_tg("❌ Continue 按钮未启用", ip_info=ip_info, email=MASKED_EMAIL)
                 return
 
+            # 现在点击按钮
+            print("🔘 点击「Continue with Email」")
+            try:
+                sb.click('#continue-btn')
+            except Exception:
+                print("⚠️ JS 点击失败，尝试常规点击")
+                sb.click('button#continue-btn')
+            print("✅ 已点击继续，等待 OTP 发送...")
+
+            # ── 等待 OTP 输入框出现 ────────────────────────────
             print("📨 等待OTP框...")
             try:
                 sb.wait_for_element_visible('.otp-input', timeout=30)
@@ -708,6 +732,7 @@ def run_script():
                 send_tg("❌ OTP框加载失败", ip_info=ip_info, email=MASKED_EMAIL)
                 return
 
+            # ── 获取并填写 OTP ──────────────────────────────────
             try:
                 code = fetch_otp_from_gmail(wait_seconds=60)
             except TimeoutError as e:
