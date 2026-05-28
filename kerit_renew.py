@@ -18,7 +18,6 @@ from seleniumbase import SB
 # ============================================================
 
 def mask_email(email_str: str) -> str:
-    """掩码邮箱：保留第一个字符和@前最后一个字符，其他用*替代"""
     parts = email_str.split("@")
     local = parts[0]
     domain = parts[1]
@@ -61,7 +60,6 @@ else:
 # ============================================================
 
 class Hy2Proxy:
-    """Hysteria2 代理管理器"""
     def __init__(self, url: str):
         self.url = url
         self.proc = None
@@ -93,7 +91,7 @@ class Hy2Proxy:
                 start_new_session=True
             )
         except FileNotFoundError:
-            print("❌ hysteria 命令未找到，请先安装 Hysteria2")
+            print("❌ hysteria 命令未找到")
             return False
         for _ in range(12):
             time.sleep(1)
@@ -288,7 +286,7 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
 
 
 # ============================================================
-# 过 CF 盾（登录前）
+# 过 CF 盾
 # ============================================================
 
 def _kerit_cf_bypass(sb) -> bool:
@@ -457,10 +455,9 @@ def do_renew(sb, ip_info=None, email=None):
 
         print(f"🔁 第{attempt + 1}/{need}次续期...")
 
-        # 1. 精确点击 Renew Server 按钮 (id=renewServerBtn)
+        # 1. 点击 Renew Server 按钮
         renew_clicked = False
         try:
-            # 确保按钮可见并点击
             sb.wait_for_element_visible('#renewServerBtn', timeout=10)
             sb.click('#renewServerBtn')
             renew_clicked = True
@@ -468,7 +465,6 @@ def do_renew(sb, ip_info=None, email=None):
         except Exception as e:
             print(f"⚠️ ID 点击异常: {e}")
             sb.save_screenshot("renew_btn_not_found.png")
-            # 备用：根据文本查找
             try:
                 btns = sb.find_elements('button')
                 for btn in btns:
@@ -477,8 +473,8 @@ def do_renew(sb, ip_info=None, email=None):
                         renew_clicked = True
                         print("✅ 已通过文本点击「Renew Server」")
                         break
-            except Exception as e2:
-                print(f"⚠️ 备用点击也失败: {e2}")
+            except Exception:
+                pass
 
         if not renew_clicked:
             print("❌ 续期按钮缺失")
@@ -486,18 +482,19 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ 续期按钮缺失，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
             return
 
-        # 2. 等待赞助商弹窗出现 (id=renewalModal)
+        # 2. 等待赞助商弹窗出现
         print("⏳ 等待赞助商弹窗...")
         try:
             sb.wait_for_element_visible('#renewalModal', timeout=15)
             print("✅ 赞助商弹窗已出现")
+            sb.save_screenshot("ad_modal_shown.png")  # 诊断截图1
         except Exception:
             print("❌ 赞助商弹窗未出现")
             sb.save_screenshot("no_ad_modal.png")
             send_tg(f"❌ 赞助商弹窗缺失，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
             return
 
-        # 3. 点击广告图片触发 openAdLink()
+        # 3. 点击广告图片
         print("🖱️ 点击赞助商广告...")
         try:
             if sb.is_element_visible('#adBanner'):
@@ -508,32 +505,45 @@ def do_renew(sb, ip_info=None, email=None):
                 sb.execute_script("openAdLink()")
             print("✅ 广告已点击，等待新窗口...")
             time.sleep(3)
+            sb.save_screenshot("ad_clicked_wait_new_window.png")  # 诊断截图2
         except Exception as e:
             print(f"⚠️ 广告点击失败: {e}")
             sb.save_screenshot("ad_click_fail.png")
             send_tg(f"❌ 广告点击失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
             return
 
-        # 4. 处理新窗口（原生方法）
-        original_window = sb.driver.current_window_handle
-        all_windows = sb.driver.window_handles
-        if len(all_windows) > 1:
-            # 切换到最新的窗口
-            for handle in all_windows:
-                if handle != original_window:
-                    sb.driver.switch_to.window(handle)
-                    break
-            print("🌐 已切换到赞助商页面")
-            time.sleep(5)  # 模拟访问
-            sb.driver.close()
-            sb.driver.switch_to.window(original_window)
-            print("✅ 已关闭广告页并返回原窗口")
+        # 4. 处理新窗口（稳健方法）
+        try:
+            # 等待可能的新窗口出现
             time.sleep(2)
-        else:
-            print("⚠️ 未检测到新窗口，可能已被阻止或原地打开，继续...")
-            time.sleep(5)
-            sb.open(FREE_PANEL_URL)
-            time.sleep(4)
+            all_windows = sb.driver.window_handles
+            print(f"当前窗口数: {len(all_windows)}")
+            if len(all_windows) > 1:
+                # 切换到最后一个窗口（广告页）
+                sb.driver.switch_to.window(all_windows[-1])
+                print("🌐 已切换到赞助商页面")
+                time.sleep(5)  # 停留模拟访问
+                sb.save_screenshot("ad_page.png")  # 诊断截图（广告页）
+                sb.driver.close()
+                # 切回原窗口
+                sb.driver.switch_to.window(all_windows[0])
+                print("✅ 已关闭广告页并返回原窗口")
+                time.sleep(2)
+            else:
+                print("⚠️ 未检测到新窗口，可能广告被拦截或原地打开，刷新页面...")
+                sb.open(FREE_PANEL_URL)
+                time.sleep(4)
+        except Exception as e:
+            print(f"❌ 处理新窗口时发生严重错误: {e}")
+            sb.save_screenshot("window_switch_error.png")  # 诊断截图3
+            # 尝试恢复：重新打开续期页
+            try:
+                sb.open(FREE_PANEL_URL)
+                time.sleep(4)
+            except:
+                pass
+            send_tg(f"❌ 窗口切换失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
+            return
 
         # 5. 等待 Complete Renewal 按钮启用
         print("⏳ 等待 Complete Renewal 按钮启用...")
@@ -627,6 +637,7 @@ def do_renew(sb, ip_info=None, email=None):
         print("🔄 刷新页面，检查续期结果...")
         sb.execute_script("window.location.reload();")
         time.sleep(4)
+        sb.save_screenshot(f"after_renew_{attempt}.png")  # 续期后截图
 
         new_remaining = extract_remaining_days(sb)
         if new_remaining > last_remaining:
