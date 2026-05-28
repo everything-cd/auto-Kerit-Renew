@@ -28,18 +28,16 @@ def mask_email(email_str: str) -> str:
 
 
 # ============================================================
-# 配置（从环境变量读取）
+# 配置
 # ============================================================
 
 _account = os.environ["KERIT_ACCOUNT"].split(",")
 KERIT_EMAIL    = _account[0].strip()
 GMAIL_PASSWORD = _account[1].strip()
 
-# 代理配置
 HY2_PROXY_URL = os.getenv('HY2_PROXY_URL', "")
 SOCKS_PORT = int(os.getenv('SOCKS_PORT', '51080'))
 
-# 邮箱掩码
 MASKED_EMAIL = mask_email(KERIT_EMAIL)
 
 LOGIN_URL      = "https://billing.kerit.cloud/"
@@ -286,7 +284,7 @@ def fetch_otp_from_gmail(wait_seconds=60) -> str:
 
 
 # ============================================================
-# 过 CF 盾
+# 过 CF 盾（登录前）
 # ============================================================
 
 def _kerit_cf_bypass(sb) -> bool:
@@ -512,52 +510,79 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ 广告点击失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
             return
 
-        # 4. 处理新窗口（稳健方法）
-        try:
-            # 等待可能的新窗口出现
-            time.sleep(2)
-            all_windows = sb.driver.window_handles
-            print(f"当前窗口数: {len(all_windows)}")
-            if len(all_windows) > 1:
-                # 切换到最后一个窗口（广告页）
-                sb.driver.switch_to.window(all_windows[-1])
-                print("🌐 已切换到赞助商页面")
-                time.sleep(5)  # 停留模拟访问
-                sb.save_screenshot("ad_page.png")  # 诊断截图（广告页）
-                sb.driver.close()
-                # 切回原窗口
-                sb.driver.switch_to.window(all_windows[0])
-                print("✅ 已关闭广告页并返回原窗口")
-                time.sleep(2)
-            else:
-                print("⚠️ 未检测到新窗口，可能广告被拦截或原地打开，刷新页面...")
-                sb.open(FREE_PANEL_URL)
-                time.sleep(4)
-        except Exception as e:
-            print(f"❌ 处理新窗口时发生严重错误: {e}")
-            sb.save_screenshot("window_switch_error.png")  # 诊断截图3
-            # 尝试恢复：重新打开续期页
-            try:
-                sb.open(FREE_PANEL_URL)
-                time.sleep(4)
-            except:
-                pass
-            send_tg(f"❌ 窗口切换失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
-            return
+        # 4. 等待广告窗口真正打开（全新稳健方法）
+        print("⏳ 等待广告窗口打开...")
+        main_window = sb.driver.current_window_handle
+        old_windows = set(sb.driver.window_handles)
+        new_window = None
 
-        # 5. 等待 Complete Renewal 按钮启用
-        print("⏳ 等待 Complete Renewal 按钮启用...")
-        btn_enabled = False
-        for _ in range(30):
+        for _ in range(20):
+            current_windows = set(sb.driver.window_handles)
+            diff = current_windows - old_windows
+            if diff:
+                new_window = diff.pop()
+                break
+            time.sleep(1)
+
+        if new_window:
+            print("✅ 检测到广告标签页")
             try:
-                disabled = sb.execute_script(
-                    "return document.getElementById('renewBtn').disabled"
-                )
-                if not disabled:
+                sb.driver.switch_to.window(new_window)
+                print("🌐 已进入广告页")
+                time.sleep(8)
+                sb.save_screenshot("ad_page.png")  # 诊断截图（广告页内容）
+                sb.driver.close()
+                print("🛑 广告页已关闭")
+            except Exception as e:
+                print(f"⚠️ 广告页处理失败: {e}")
+                sb.save_screenshot("ad_page_error.png")
+            finally:
+                # 切回主页面
+                sb.driver.switch_to.window(main_window)
+                sb.driver.execute_script("window.focus();")
+                time.sleep(3)
+        else:
+            print("⚠️ 没检测到新标签页")
+            # 有些广告可能是当前页跳转
+            current_url = sb.get_current_url()
+            if "billing.kerit.cloud" not in current_url:
+                print("↩️ 当前页被跳转，返回续期页")
+                sb.go_back()
+                time.sleep(5)
+                sb.driver.execute_script("window.focus();")
+                time.sleep(3)
+            else:
+                # 如果还在同一页，可能广告未打开，强制刷新
+                print("⏳ 未离开当前页，刷新以恢复状态")
+                sb.open(FREE_PANEL_URL)
+                time.sleep(4)
+
+        # 5. 等待 Complete Renewal 按钮激活（增强检测）
+        print("⏳ 等待 Complete Renewal 按钮激活...")
+        btn_enabled = False
+        for i in range(40):
+            try:
+                state = sb.execute_script("""
+                    (function(){
+                        let btn = document.getElementById('renewBtn');
+                        if (!btn) return "NO_BUTTON";
+                        let disabled = btn.disabled || btn.hasAttribute('disabled');
+                        let style = window.getComputedStyle(btn);
+                        return JSON.stringify({
+                            disabled: disabled,
+                            opacity: style.opacity,
+                            pointer: style.pointerEvents,
+                            class: btn.className
+                        });
+                    })()
+                """)
+                print(f"按钮状态: {state}")
+                data = json.loads(state)
+                if not data["disabled"]:
                     btn_enabled = True
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"状态检测异常: {e}")
             time.sleep(1)
 
         if not btn_enabled:
@@ -566,15 +591,22 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ Complete Renewal 未启用，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
             return
 
-        print("🔘 点击「Complete Renewal」")
+        # 6. 点击 Complete Renewal（JS 点击）
+        print("🔘 点击 Complete Renewal")
         try:
-            sb.click('#renewBtn')
-        except Exception:
-            print("⚠️ 常规点击失败，尝试 JS 点击")
-            sb.execute_script("document.getElementById('renewBtn').click()")
+            sb.execute_script("""
+                let btn = document.getElementById('renewBtn');
+                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                btn.click();
+            """)
+        except Exception as e:
+            print(f"JS点击失败: {e}")
+            sb.save_screenshot("renew_click_fail.png")
+            send_tg(f"❌ Complete Renewal 点击失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
+            return
         time.sleep(2)
 
-        # 6. 等待 Turnstile
+        # 7. 等待 Turnstile
         print("⏳ 等待Turnstile...")
         for _ in range(20):
             if turnstile_exists(sb):
@@ -598,7 +630,7 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ Token获取失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
             return
 
-        # 7. 提交续期 API
+        # 8. 提交续期 API
         print("🎯 提交续期...")
         result = sb.execute_script(f"""
             (async function() {{
@@ -627,7 +659,7 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ 续期API解析错误", server_id, ip_info=ip_info, email=email)
             return
 
-        # 8. 关闭弹窗、刷新验证
+        # 9. 关闭弹窗、刷新验证
         try:
             sb.execute_script("document.querySelector('[data-bs-dismiss=\"modal\"]')?.click();")
         except Exception:
@@ -637,7 +669,7 @@ def do_renew(sb, ip_info=None, email=None):
         print("🔄 刷新页面，检查续期结果...")
         sb.execute_script("window.location.reload();")
         time.sleep(4)
-        sb.save_screenshot(f"after_renew_{attempt}.png")  # 续期后截图
+        sb.save_screenshot(f"after_renew_{attempt}.png")
 
         new_remaining = extract_remaining_days(sb)
         if new_remaining > last_remaining:
@@ -665,7 +697,7 @@ def do_renew(sb, ip_info=None, email=None):
 
 
 # ============================================================
-# 主流程
+# 主流程（调整了 SB 初始化参数）
 # ============================================================
 
 def run_script():
@@ -677,7 +709,8 @@ def run_script():
     print(f"🌐 IP 信息：{ip_info}")
 
     try:
-        with SB(uc=True, test=True, proxy=proxy_url) as sb:
+        # 关键调整：移除 test=True，显式 headless=False
+        with SB(uc=True, test=False, proxy=proxy_url, headless=False) as sb:
             print("🚀 浏览器就绪！")
 
             # IP 验证
