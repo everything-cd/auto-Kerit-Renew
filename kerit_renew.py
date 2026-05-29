@@ -542,11 +542,35 @@ def do_renew(sb, ip_info=None, email=None):
             print("⚠️ 常规点击失败，尝试 JS 点击")
             sb.execute_script("document.getElementById('renewBtn').click()")
 
-        # 7. 等待续期完成
-        print("⏳ 等待续期完成...")
-        time.sleep(5)
-        sb.save_screenshot(f"after_complete_renewal_{attempt}.png")
+        # 7. 等待续期完成，并检测上限提示
+        print("⏳ 等待续期结果...")
+        time.sleep(3)
 
+        # 检查弹窗内是否出现 "Cannot exceed" 这类上限提示
+        limit_reached = False
+        try:
+            # 尝试获取整个弹窗的可见文本
+            modal_text = sb.execute_script("""
+                var modal = document.querySelector('#renewalModal');
+                return modal ? modal.innerText : '';
+            """)
+            if modal_text and re.search(r'cannot\s*exceed|exceed.*validity|limit\s*reached', modal_text, re.IGNORECASE):
+                print("✅ 检测到上限提示，本周续期已满")
+                limit_reached = True
+                sb.save_screenshot("limit_reached.png")
+                # 手动关闭弹窗
+                try:
+                    sb.execute_script("closeRenewalModal()")
+                except:
+                    pass
+                # 发送成功通知并退出
+                current_remaining = extract_remaining_days(sb) or initial_remaining
+                send_tg("✅ 续期成功（本周上限已满）", server_id, current_remaining, ip_info=ip_info, email=email)
+                return
+        except Exception as e:
+            print(f"⚠️ 上限检测异常: {e}")
+
+        # 若无上限提示，继续常规流程
         # 若弹窗仍存在，手动关闭
         try:
             if sb.is_element_visible('#renewalModal'):
@@ -570,7 +594,7 @@ def do_renew(sb, ip_info=None, email=None):
             })()
         """)
 
-        # 判断续期是否成功（天数增加 或 已达上限）
+        # 判断是否成功
         if new_remaining > last_remaining:
             print(f"✅ 续期生效，剩余天数由 {last_remaining} 变为 {new_remaining}")
             last_remaining = new_remaining
@@ -578,13 +602,15 @@ def do_renew(sb, ip_info=None, email=None):
             print(f"✅ 续期已达上限，剩余天数: {new_remaining}天")
             send_tg("✅ 续期成功（本周上限已满）", server_id, new_remaining, ip_info=ip_info, email=email)
             return
+        elif limit_reached:  # 已在前面处理，这里不会到达
+            pass
         else:
             print(f"⚠️ 续期后剩余天数未增加（{last_remaining} → {new_remaining}），且未达上限")
             sb.save_screenshot(f"renew_not_effective_{attempt}.png")
             send_tg(f"❌ 续期失败，剩余天数未增加", server_id, new_remaining, ip_info=ip_info, email=email)
             return
 
-    # 全部循环结束后
+    # 全部循环结束
     sb.save_screenshot("renew_done.png")
     final_count = sb.execute_script("""
         (function(){
