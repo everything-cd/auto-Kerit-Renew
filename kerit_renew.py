@@ -337,20 +337,6 @@ def turnstile_exists(sb) -> bool:
     except Exception:
         return False
 
-def get_token_value(sb) -> str:
-    try:
-        token = sb.execute_script("""
-            (function(){
-                var input = document.querySelector('input[name="cf-turnstile-response"]');
-                return (input && input.value) ? input.value : '';
-            })()
-        """)
-        if token and len(token) > 20:
-            return token
-    except Exception:
-        pass
-    return ''
-
 def solve_turnstile_on_page(sb) -> bool:
     try:
         sb.uc_gui_click_captcha()
@@ -501,15 +487,33 @@ def do_renew(sb, ip_info=None, email=None):
                 sb.click('[onclick="openAdLink()"]')
             else:
                 sb.execute_script("openAdLink()")
-            print("✅ 广告已点击，等待按钮启用...")
+            print("✅ 广告已点击，等待 Turnstile 出现...")
             sb.save_screenshot("ad_clicked.png")
         except Exception as e:
             print(f"⚠️ 广告点击失败: {e}")
             sb.save_screenshot("ad_click_fail.png")
-            send_tg(f"❌ 广告点击失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
+            send_tg(f"❌ 广告点击失败，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
             return
 
-        # 4. 等待 Complete Renewal 按钮启用（不需要切换窗口）
+        # 4. 等待 Turnstile 出现并解决
+        print("⏳ 等待Turnstile...")
+        for _ in range(20):
+            if turnstile_exists(sb):
+                print("🛡️ 检测到Turnstile")
+                break
+            time.sleep(1)
+        else:
+            print("❌ Turnstile未出现")
+            sb.save_screenshot(f"no_turnstile_{attempt}.png")
+            send_tg(f"❌ Turnstile未出现，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
+            return
+
+        if not solve_turnstile_on_page(sb):
+            sb.save_screenshot(f"turnstile_fail_{attempt}.png")
+            send_tg(f"❌ Turnstile验证失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
+            return
+
+        # 5. 等待 Complete Renewal 按钮启用
         print("⏳ 等待 Complete Renewal 按钮启用...")
         btn_enabled = False
         for _ in range(30):
@@ -530,74 +534,29 @@ def do_renew(sb, ip_info=None, email=None):
             send_tg(f"❌ Complete Renewal 未启用，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
             return
 
+        # 6. 点击 Complete Renewal
         print("🔘 点击「Complete Renewal」")
         try:
             sb.click('#renewBtn')
         except Exception:
             print("⚠️ 常规点击失败，尝试 JS 点击")
             sb.execute_script("document.getElementById('renewBtn').click()")
-        time.sleep(2)
 
-        # 5. 等待 Turnstile
-        print("⏳ 等待Turnstile...")
-        for _ in range(20):
-            if turnstile_exists(sb):
-                print("🛡️ 检测到Turnstile")
-                break
-            time.sleep(1)
-        else:
-            print("❌ Turnstile未出现")
-            sb.save_screenshot(f"no_turnstile_{attempt}.png")
-            send_tg(f"❌ Turnstile未出现，第{attempt + 1}次失败", server_id, ip_info=ip_info, email=email)
-            return
+        # 7. 等待续期完成（弹窗关闭、页面自动刷新或天数变化）
+        print("⏳ 等待续期完成...")
+        time.sleep(5)  # 等待可能的页面反应
+        sb.save_screenshot(f"after_complete_renewal_{attempt}.png")
 
-        if not solve_turnstile_on_page(sb):
-            sb.save_screenshot(f"turnstile_fail_{attempt}.png")
-            send_tg(f"❌ Turnstile验证失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
-            return
-
-        token = get_token_value(sb)
-        if not token:
-            print("❌ Token获取失败")
-            send_tg(f"❌ Token获取失败，第{attempt + 1}次", server_id, ip_info=ip_info, email=email)
-            return
-
-        # 6. 提交续期 API
-        print("🎯 提交续期...")
-        result = sb.execute_script(f"""
-            (async function() {{
-                const res = await fetch('/api/renew', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    credentials: 'include',
-                    body: JSON.stringify({{ id: '{server_id}', captcha: '{token}' }})
-                }});
-                const data = await res.json();
-                return JSON.stringify(data);
-            }})()
-        """)
+        # 尝试检查弹窗是否消失
         try:
-            res_obj = json.loads(result)
-            if isinstance(res_obj, dict) and res_obj.get('success') is True:
-                print("✅ 续期成功")
-            else:
-                print(f"❌ 续期失败: {result}")
-                sb.save_screenshot(f"renew_fail_{attempt}.png")
-                send_tg(f"❌ 续期API返回非成功: {result}", server_id, ip_info=ip_info, email=email)
-                return
-        except Exception:
-            print(f"❌ API返回无法解析: {result}")
-            sb.save_screenshot(f"renew_fail_{attempt}.png")
-            send_tg(f"❌ 续期API解析错误", server_id, ip_info=ip_info, email=email)
-            return
-
-        # 7. 关闭弹窗、刷新验证
-        try:
-            sb.execute_script("document.querySelector('[data-bs-dismiss=\"modal\"]')?.click();")
-        except Exception:
+            if sb.is_element_visible('#renewalModal'):
+                print("⚠️ 弹窗未自动关闭，尝试手动关闭")
+                sb.execute_script("closeRenewalModal()")
+                time.sleep(2)
+        except:
             pass
-        time.sleep(2)
 
+        # 刷新页面以确保最新数据
         print("🔄 刷新页面，检查续期结果...")
         sb.execute_script("window.location.reload();")
         time.sleep(4)
